@@ -1,0 +1,84 @@
+---
+title: "HW3_sara_barrett"
+author: "sara barrett"
+date: "March 3, 2015"
+output: html_document
+---
+
+
+## Get the data from GEO
+```{r}
+suppressMessages(library(GEOquery)) 
+gds <- getGEO("GSE40812", destdir = getwd())
+gds <- gds[[1]]
+
+# Sanitize data and metadata
+
+gds_new <- gds
+
+# Function to sanitize data
+sanitize_pdata <- function(pd) {
+keepCols <- c("title", "source_name_ch1", "characteristics_ch1", "characteristics_ch1.2")
+pd <- pd[, keepCols]
+colnames(pd) <- c("ptid", "cellType", "infectionStatus", "treatment")
+pd$ptid <- sapply(pd$ptid, FUN=function(x) {unlist(strsplit(as.character(x), "_"))[2]}) 
+pd$infectionStatus <- gsub(".*: ", "", pd$infectionStatus) 
+pd$treatment <- gsub(".*: ", "", pd$treatment)
+pd$treatment <- gsub("Poly IC H", "Poly", pd$treatment)
+pd
+}
+
+pData(gds_new) <- sanitize_pdata(pData(gds_new))
+```
+
+## Normalize the data
+This is not necessary because, according to the data (Sample_data_processing):  Microarray data from the validation cohort underwent quantile normalization using the lumi package in bioconductor [R version 2.13.2, Lumi version 2.4, Limma version 3.8.3].
+
+## Use limma to test for differential expression
+```{r}
+# Figure 2 examines macrophage gene expression 
+macrophageData <- gds_new[, pData(gds_new)$cellType=="Monocyte-derived Macrophage"]
+
+# Load the limma package
+suppressMessages(library(limma))
+
+# Test for differential expression 
+mm1 <- model.matrix(~treatment+ptid, macrophageData)
+fit1 <- lmFit(macrophageData, mm1)
+ebay1 <- eBayes(fit1)
+
+# Select differentially expressed genes
+# According to the paper: Poly(IC) response signatures were generated based on FC >= 1.5 relative to Mock, statistically significant change in exp as determined by limma (BH FDR <0.05)
+# BH is default
+tt1 <- topTable(ebay1, coef="treatmentPoly", number=Inf, p.value=0.05, lfc=log2(1.5), sort.by="p")
+polyICresp <- tt1$Probe_Id
+set1 <- macrophageData[rownames(exprs(macrophageData)) %in% polyICresp, ]
+
+# The second test for differential expression accounts for viral load
+combineVar <- factor (paste(macrophageData$treatment, macrophageData$infectionStatus, sep = ""))
+mm2 <- model.matrix (~0+combineVar, set1) #0 required for intercept
+fit2 <- lmFit(set1, mm2)
+cm <- makeContrasts (combineVarMockNeg - combineVarMockPos, combineVarPolyNeg - combineVarPolyPos, levels = mm2)
+fitcm <- contrasts.fit(fit2, cm)
+ebay2 <- eBayes (fitcm)
+
+# Select differentially expressed genes (p < 0.1)
+tt2 <- topTable(ebay2, number = Inf, adjust.method="none", p.value=0.1)
+set2Res <- tt2$Probe_Id
+final <- exprs(macrophageData)[rownames(exprs(macrophageData)) %in% set2Res, ]
+```
+
+## Display the results using a heatmap
+
+```{r}
+# Load the pheatmap package
+suppressMessages(library(pheatmap))
+
+# Adjust the labels and order according to published figure
+colnames(final) <- paste(pData(macrophageData)$treatment, pData(macrophageData)$infectionStatus, pData(macrophageData)$ptid, sep=" ")
+finalOrder <- with(pData(macrophageData),order(treatment, infectionStatus, ptid))
+final <- final[,finalOrder]
+
+# Display the results
+pheatmap(final, cluster_cols=FALSE, cluster_rows=FALSE, legend=TRUE, fontsize=8) 
+```
